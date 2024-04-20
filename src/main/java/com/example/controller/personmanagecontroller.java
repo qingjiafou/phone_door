@@ -1,13 +1,11 @@
 package com.example.controller;
 
-import java.util.HashMap;
+import java.net.http.WebSocket;
 import java.util.List;
 import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -17,13 +15,14 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.example.entity.State;
 import com.example.entity.User;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.websocket.to.UnifiedTo;
 
 @RestController
 @RequestMapping("/person")
 public class personmanagecontroller {
 
+    @Autowired
+    WebSocket defaultWebSocket;
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
@@ -31,14 +30,38 @@ public class personmanagecontroller {
      * 展示所有成员信息
      */
     @GetMapping("/all")
-    public ResponseEntity<List<Map<String, Object>>> getAllUserData() {
+    public UnifiedTo getAllUserData() {
         String sql = "SELECT * FROM user_information";
-        List<Map<String, Object>> userData = jdbcTemplate.queryForList(sql);
+        try {
+            List<Map<String, Object>> userData = jdbcTemplate.queryForList(sql);
 
-        if (!userData.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.OK).body(userData);
-        } else {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(null);
+            UnifiedTo unifiedTo = new UnifiedTo();
+            if (!userData.isEmpty()) {
+                // 查询成功
+                unifiedTo.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+                State state = new State();
+                state.setstate_code(200);
+                state.setstate_msg("Data retrieved successfully");
+                unifiedTo.setState(state);
+                unifiedTo.setReqPayload(userData);
+            } else {
+                // 查询结果为空
+                unifiedTo.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+                State state = new State();
+                state.setstate_code(404);
+                state.setstate_msg("No data found");
+                unifiedTo.setState(state);
+            }
+            return unifiedTo;
+        } catch (DataAccessException e) {
+            // 查询过程中出现异常
+            UnifiedTo unifiedTo = new UnifiedTo();
+            unifiedTo.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            State state = new State();
+            state.setstate_code(500);
+            state.setstate_msg("Failed to retrieve data");
+            unifiedTo.setState(state);
+            return unifiedTo;
         }
     }
 
@@ -46,36 +69,41 @@ public class personmanagecontroller {
      * 以用户的id进行搜索
      */
     @PostMapping("/search")
-    public ResponseEntity<String> searchUserData(@RequestBody User updatedUser) {
-        String sql = "select * FROM user_information WHERE USER_ID=?";
+    public UnifiedTo searchUserData(@RequestBody User updatedUser) {
+        String sql = "SELECT * FROM user_information WHERE USER_ID=?";
         try {
             // 执行查询
             List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, updatedUser.getUSER_ID());
 
+            UnifiedTo unifiedTo = new UnifiedTo();
             if (!result.isEmpty()) {
                 // 创建状态对象并设置状态信息
                 State state = new State();
                 state.setstate_code(200);
-                state.setstate_msg("search successful");
+                state.setstate_msg("Search successful");
 
-                // 将状态信息和查询结果添加到返回的 JSON 中
-                ObjectMapper objectMapper = new ObjectMapper();
-                Map<String, Object> responseMap = new HashMap<>();
-                responseMap.put("state", state);
-                responseMap.put("data", result);
-
-                String responseJson = objectMapper.writeValueAsString(responseMap);
-                return ResponseEntity.status(HttpStatus.OK).body(responseJson);
+                // 设置状态和查询结果到 UnifiedTo 对象中
+                unifiedTo.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+                unifiedTo.setState(state);
+                unifiedTo.setReqPayload(result);
             } else {
                 // 如果结果为空，则返回未找到数据的错误信息
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).body("No data found");
+                unifiedTo.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+                State state = new State();
+                state.setstate_code(404);
+                state.setstate_msg("No data found");
+                unifiedTo.setState(state);
             }
-        } catch (JsonProcessingException e) {
-            e.printStackTrace();
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Serialization failed");
+            return unifiedTo;
         } catch (DataAccessException e) {
-            e.printStackTrace();
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Failed to search data");
+            // 查询过程中出现异常
+            UnifiedTo unifiedTo = new UnifiedTo();
+            unifiedTo.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            State state = new State();
+            state.setstate_code(500);
+            state.setstate_msg("Failed to search data");
+            unifiedTo.setState(state);
+            return unifiedTo;
         }
     }
 
@@ -83,47 +111,58 @@ public class personmanagecontroller {
      * 修改信息
      */
     @PostMapping("/modify")
-    public ResponseEntity<String> updateUserData(@RequestBody User updatedUser) {
+    public UnifiedTo updateUserData(@RequestBody User updatedUser) {
         // 验证用户身份
         String authorizationToken = updatedUser.getAUTHORIZATION_TOKEN();
         if (!isValidUser(authorizationToken)) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Unauthorized access");
+            UnifiedTo unauthorizedResponse = new UnifiedTo();
+            unauthorizedResponse.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            State unauthorizedState = new State();
+            unauthorizedState.setstate_code(401);
+            unauthorizedState.setstate_msg("Unauthorized access");
+            unauthorizedResponse.setState(unauthorizedState);
+            return unauthorizedResponse;
         }
+
         String sql = "UPDATE user_information SET USER_NAME=?, FACE_INFORMATION=?, FINGER_INFORMATION=?, ADMIN_AUTORITY=?, DOOR_UNION=?, DOOR_ID=?, USER_PASSWORD=?, DOOR_NUMBER=? WHERE USER_ID=?";
-        int rowsAffected = jdbcTemplate.update(sql,
-                updatedUser.getUSER_NAME(),
-                updatedUser.getFACE_INFORMATION(),
-                updatedUser.getFINGER_INFORMATION(),
-                updatedUser.getADMIN_AUTORITY(),
-                updatedUser.getDOOR_UNION(),
-                updatedUser.getDOOR_ID(),
-                updatedUser.getUSER_PASSWORD(),
-                updatedUser.getDOOR_NUMBER(),
-                updatedUser.getUSER_ID()); // 将 USER_ID 作为参数传递到 SQL 语句中
+        try {
+            int rowsAffected = jdbcTemplate.update(sql,
+                    updatedUser.getUSER_NAME(),
+                    updatedUser.getFACE_INFORMATION(),
+                    updatedUser.getFINGER_INFORMATION(),
+                    updatedUser.getADMIN_AUTORITY(),
+                    updatedUser.getDOOR_UNION(),
+                    updatedUser.getDOOR_ID(),
+                    updatedUser.getUSER_PASSWORD(),
+                    updatedUser.getDOOR_NUMBER(),
+                    updatedUser.getUSER_ID()); // 将 USER_ID 作为参数传递到 SQL 语句中
 
-        if (rowsAffected > 0) {
-            // 创建状态对象并设置状态信息
-            State state = new State();
-            state.setstate_code(200);
-            state.setstate_msg("Modification successful");
-            saveLogToDatabase("修改身份信息", updatedUser.getAUTHORIZATION_TOKEN());
-            // 将状态信息添加到返回的 JSON 中
-            ObjectMapper objectMapper = new ObjectMapper();
-            try {
-                Map<String, Object> responseMap = new HashMap<>();
-                responseMap.put("state", state);
-                responseMap.put("message", "Data updated successfully");
-
-                String responseJson = objectMapper.writeValueAsString(responseMap);
-                return ResponseEntity.status(HttpStatus.OK).body(responseJson);
-            } catch (JsonProcessingException e) {
-                e.printStackTrace();
-                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("updated failed");
+            UnifiedTo response = new UnifiedTo();
+            response.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            if (rowsAffected > 0) {
+                // 更新成功
+                State state = new State();
+                state.setstate_code(200);
+                state.setstate_msg("Modification successful");
+                response.setState(state);
+                saveLogToDatabase("修改身份信息", authorizationToken);
+            } else {
+                // 更新失败，返回具体错误信息
+                State state = new State();
+                state.setstate_code(500);
+                state.setstate_msg("Failed to update data: No rows affected");
+                response.setState(state);
             }
-        } else {
-            // 更新失败，返回具体错误信息
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body("Failed to update data: No rows affected");
+            return response;
+        } catch (DataAccessException e) {
+            // 更新过程中出现异常
+            UnifiedTo errorResponse = new UnifiedTo();
+            errorResponse.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            State errorState = new State();
+            errorState.setstate_code(500);
+            errorState.setstate_msg("Failed to update data: Database error");
+            errorResponse.setState(errorState);
+            return errorResponse;
         }
     }
     /*
@@ -131,77 +170,101 @@ public class personmanagecontroller {
      */
 
     @PostMapping("/delete")
-    public ResponseEntity<String> deleteUserData(@RequestBody User updatedUser) {
+    public UnifiedTo deleteUserData(@RequestBody User updatedUser) {
         // 验证用户身份
         String authorizationToken = updatedUser.getAUTHORIZATION_TOKEN();
         if (!isValidUser(authorizationToken)) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Unauthorized access");
+            UnifiedTo unauthorizedResponse = new UnifiedTo();
+            unauthorizedResponse.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            State unauthorizedState = new State();
+            unauthorizedState.setstate_code(401);
+            unauthorizedState.setstate_msg("Unauthorized access");
+            unauthorizedResponse.setState(unauthorizedState);
+            return unauthorizedResponse;
         }
         String sql = "DELETE FROM user_information WHERE USER_ID=?";
-        int rowsAffected = jdbcTemplate.update(sql, updatedUser.getUSER_ID());
-        if (rowsAffected > 0) {
-            // 创建状态对象并设置状态信息
-            State state = new State();
-            state.setstate_code(200);
-            state.setstate_msg("Deletion successful");
-            saveLogToDatabase("删除身份信息", updatedUser.getAUTHORIZATION_TOKEN());
-            // 将状态信息添加到返回的 JSON 中
-            ObjectMapper objectMapper = new ObjectMapper();
-            try {
-                Map<String, Object> responseMap = new HashMap<>();
-                responseMap.put("state", state);
-                responseMap.put("message", "Data deleted successfully");
-
-                String responseJson = objectMapper.writeValueAsString(responseMap);
-                return ResponseEntity.status(HttpStatus.OK).body(responseJson);
-            } catch (JsonProcessingException e) {
-                e.printStackTrace();
-                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Serialization failed");
+        try {
+            int rowsAffected = jdbcTemplate.update(sql, updatedUser.getUSER_ID());
+            UnifiedTo response = new UnifiedTo();
+            response.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            if (rowsAffected > 0) {
+                // 删除成功
+                State state = new State();
+                state.setstate_code(200);
+                state.setstate_msg("Deletion successful");
+                response.setState(state);
+                saveLogToDatabase("删除身份信息", authorizationToken);
+            } else {
+                // 删除失败，返回具体错误信息
+                State state = new State();
+                state.setstate_code(500);
+                state.setstate_msg("Failed to delete data");
+                response.setState(state);
             }
-        } else {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Failed to delete data");
+            return response;
+        } catch (DataAccessException e) {
+            // 删除过程中出现异常
+            UnifiedTo errorResponse = new UnifiedTo();
+            errorResponse.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            State errorState = new State();
+            errorState.setstate_code(500);
+            errorState.setstate_msg("Failed to delete data: Database error");
+            errorResponse.setState(errorState);
+            return errorResponse;
         }
     }
 
     @PostMapping("/add")
-    public ResponseEntity<String> adddateUserData(@RequestBody User updatedUser) {
+    public UnifiedTo addUserData(@RequestBody User updatedUser) {
         // 验证用户身份
         String authorizationToken = updatedUser.getAUTHORIZATION_TOKEN();
         if (!isValidUser(authorizationToken)) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Unauthorized access");
+            UnifiedTo unauthorizedResponse = new UnifiedTo();
+            unauthorizedResponse.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            State unauthorizedState = new State();
+            unauthorizedState.setstate_code(401);
+            unauthorizedState.setstate_msg("Unauthorized access");
+            unauthorizedResponse.setState(unauthorizedState);
+            return unauthorizedResponse;
         }
-        String sql = "insert into user_information  (USER_NAME, USER_ID, USER_PASSWORD, ADMIN_AUTORITY, DOOR_ID, DOOR_NUMBER, FACE_INFORMATION, FINGER_INFORMATION, DOOR_UNION) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        int rowsAffected = jdbcTemplate.update(sql,
-                updatedUser.getUSER_NAME(),
-                updatedUser.getUSER_ID(),
-                updatedUser.getUSER_PASSWORD(),
-                updatedUser.getADMIN_AUTORITY(),
-                updatedUser.getDOOR_ID(),
-                updatedUser.getDOOR_NUMBER(),
-                updatedUser.getFACE_INFORMATION(),
-                updatedUser.getFINGER_INFORMATION(),
-                updatedUser.getDOOR_UNION());
-        if (rowsAffected > 0) {
-            // 创建状态对象并设置状态信息
-            State state = new State();
-            state.setstate_code(200);
-            state.setstate_msg("Add successful");
-            saveLogToDatabase("添加身份信息", updatedUser.getAUTHORIZATION_TOKEN());
-            // 将状态信息添加到返回的 JSON 中
-            ObjectMapper objectMapper = new ObjectMapper();
-            try {
-                Map<String, Object> responseMap = new HashMap<>();
-                responseMap.put("state", state);
-                responseMap.put("message", "Data add successfully");
-
-                String responseJson = objectMapper.writeValueAsString(responseMap);
-                return ResponseEntity.status(HttpStatus.OK).body(responseJson);
-            } catch (JsonProcessingException e) {
-                e.printStackTrace();
-                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("add failed");
+        String sql = "INSERT INTO user_information (USER_NAME, USER_ID, USER_PASSWORD, ADMIN_AUTORITY, DOOR_ID, DOOR_NUMBER, FACE_INFORMATION, FINGER_INFORMATION, DOOR_UNION) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        try {
+            int rowsAffected = jdbcTemplate.update(sql,
+                    updatedUser.getUSER_NAME(),
+                    updatedUser.getUSER_ID(),
+                    updatedUser.getUSER_PASSWORD(),
+                    updatedUser.getADMIN_AUTORITY(),
+                    updatedUser.getDOOR_ID(),
+                    updatedUser.getDOOR_NUMBER(),
+                    updatedUser.getFACE_INFORMATION(),
+                    updatedUser.getFINGER_INFORMATION(),
+                    updatedUser.getDOOR_UNION());
+            UnifiedTo response = new UnifiedTo();
+            response.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            if (rowsAffected > 0) {
+                // 添加成功
+                State state = new State();
+                state.setstate_code(200);
+                state.setstate_msg("Add successful");
+                response.setState(state);
+                saveLogToDatabase("添加身份信息", authorizationToken);
+            } else {
+                // 添加失败，返回具体错误信息
+                State state = new State();
+                state.setstate_code(500);
+                state.setstate_msg("Failed to add data");
+                response.setState(state);
             }
-        } else {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Failed to  data");
+            return response;
+        } catch (DataAccessException e) {
+            // 添加过程中出现异常
+            UnifiedTo errorResponse = new UnifiedTo();
+            errorResponse.setReqType(UnifiedTo.ReqType.ACK_TYPE.value);
+            State errorState = new State();
+            errorState.setstate_code(500);
+            errorState.setstate_msg("Failed to add data: Database error");
+            errorResponse.setState(errorState);
+            return errorResponse;
         }
     }
 
